@@ -1,0 +1,69 @@
+# Downloads an offline translation model from Hugging Face on GitHub's servers, tests it, and
+# publishes it to a branch of this repository (split into 40 MB parts, under GitHub's file limit).
+# Useful when Hugging Face is blocked on the local network.
+# On the PC:  .\tools\fetch-model-from-github.ps1
+name: Fetch translation model
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "Hugging Face model (CTranslate2 format)"
+        default: "quickmt/quickmt-en-he"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MODEL: ${{ inputs.model }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install CTranslate2
+        run: python -m pip install --upgrade ctranslate2 sentencepiece huggingface_hub
+
+      - name: Download model
+        run: |
+          python - <<'PY'
+          import os
+          from huggingface_hub import snapshot_download
+          snapshot_download(
+              repo_id=os.environ["MODEL"],
+              local_dir="model",
+              allow_patterns=["config.json", "model.bin", "*.spm*", "*.model", "*vocabulary*.json", "README.md"],
+          )
+          PY
+          ls -la model
+
+      - name: Test translation
+        run: python tools/ct2_selftest.py tools model
+
+      - name: Split and publish to branch
+        run: |
+          set -euo pipefail
+          BRANCH="model-$(basename "$MODEL")"
+          mkdir out
+          find model -maxdepth 1 -type f ! -name model.bin -exec cp {} out/ \;
+          split -b 40m -d -a 3 model/model.bin out/model.bin.part
+          (cd model && sha256sum model.bin) > out/SHA256SUMS
+          echo "$MODEL" > out/SOURCE
+          ls -la out
+          cd out
+          git init -q
+          git checkout -q -b "$BRANCH"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Model $MODEL"
+          git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" "HEAD:refs/heads/$BRANCH"
+          echo "### Model published to branch \`$BRANCH\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "On the PC run: \`.\\tools\\fetch-model-from-github.ps1\`" >> "$GITHUB_STEP_SUMMARY"
